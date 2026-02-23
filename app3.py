@@ -7,44 +7,40 @@ from bs4 import BeautifulSoup
 import re
 import base64
 
-# --- FUNCIÓN DE LIMPIEZA DEFINITIVA PARA PEM ---
+# --- FUNCIÓN DE LIMPIEZA DEFINITIVA PARA LA CLAVE PEM ---
 def limpiar_llave_pem(llave):
     if not llave: return ""
-    
-    # 1. Convertir a string por si acaso y quitar espacios laterales
+    # Convertir a string y quitar espacios invisibles en los extremos
     llave = str(llave).strip()
-    
-    # 2. Arreglar saltos de línea literales (\n) que a veces se pegan mal
+    # Arreglar saltos de línea literales que a veces se pegan mal como texto
     llave = llave.replace("\\n", "\n")
-    
-    # 3. Eliminar comillas que a veces envuelven la clave en los Secrets
+    # Eliminar comillas accidentales
     llave = llave.replace('"', '').replace("'", "")
     
-    # 4. Localizar el inicio real del bloque PEM (evita el error de InvalidByte antes del guion)
     inicio_tag = "-----BEGIN PRIVATE KEY-----"
     fin_tag = "-----END PRIVATE KEY-----"
     
     if inicio_tag in llave:
-        # Cortamos cualquier carácter extraño que haya antes del primer '-'
+        # Forzamos que empiece exactamente en el guion del encabezado
         llave = llave[llave.find(inicio_tag):]
-        
+    
     return llave
 
-# --- 1. CONFIGURACIÓN DE SECRETOS ---
+# --- 1. CONFIGURACIÓN DE SECRETOS (GCP Y GEMINI) ---
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
     g_secrets = st.secrets["GCP_SERVICE_ACCOUNT"]
     EXCEL_NAME = st.secrets["EXCEL_NAME"]
     SHEET_NAME = st.secrets.get("SHEET_NAME", "Hoja 1")
     
-    # Aplicamos la limpieza a la clave privada antes de crear las credenciales
-    private_key_limpia = limpiar_llave_pem(g_secrets["private_key"])
+    # Limpieza de la clave antes de pasarla a las credenciales de Google
+    private_key_fijada = limpiar_llave_pem(g_secrets["private_key"])
     
     creds_dict = {
         "type": g_secrets["type"],
         "project_id": g_secrets["project_id"],
         "private_key_id": g_secrets["private_key_id"],
-        "private_key": private_key_limpia,
+        "private_key": private_key_fijada,
         "client_email": g_secrets["client_email"],
         "client_id": g_secrets["client_id"],
         "auth_uri": g_secrets["auth_uri"],
@@ -53,5 +49,141 @@ try:
         "client_x509_cert_url": g_secrets["client_x509_cert_url"]
     }
 except Exception as e:
-    st.error(f"❌ Error en la carga de Secretos: {e}")
+    st.error(f"❌ Error cargando Secrets: {e}")
     st.stop()
+
+st.set_page_config(page_title="Catalogador Gemini 2.5 Pro", layout="wide", page_icon="📚")
+
+if 'datos_extraidos' not in st.session_state:
+    st.session_state.datos_extraidos = None
+
+# --- 2. LÓGICA DE IA (USANDO TU MODELO DETECTADO 2.5 FLASH) ---
+
+def analizar_con_ia(texto, fotos):
+    # Usamos el modelo estrella de tu cuenta
+    modelo = "models/gemini-2.5-flash"
+    url_ia = f"https://generativelanguage.googleapis.com/v1beta/{modelo}:generateContent?key={API_KEY}"
+    
+    prompt = """
+    Extrae la información de este libro y devuélvela estrictamente en formato JSON plano.
+    Campos: Autor, Titulo, Traductor, Ilustrador, Editorial, Coleccion, Poblacion, Año, 
+    Primera_Edicion, Tematica, Categorias, Encuadernacion, ISBN, Idioma, 
+    Observaciones, Paginas, Medidas, Peso, Precio.
+    Si no sabes un dato pon '---'. No añadas texto explicativo.
+    """
+    
+    partes = [{"text": f"{prompt}\n\nTexto extraído: {texto[:3000]}"}]
+    
+    # Enviamos solo la primera foto para máxima estabilidad de tokens
+    if fotos:
+        try:
+            img_data = base64.b64encode(requests.get(fotos[0], timeout=5).content).decode('utf-8')
+            partes.append({"inline_data": {"mime_type": "image/jpeg", "data": img_data}})
+        except: pass
+
+    payload = {
+        "contents": [{"parts": partes}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "response_mime_type": "application/json"
+        }
+    }
+
+    try:
+        res = requests.post(url_ia, json=payload, timeout=30)
+        res_j = res.json()
+        if 'candidates' in res_j:
+            raw_json = res_j['candidates'][0]['content']['parts'][0]['text']
+            return json.loads(raw_json)
+        else:
+            st.error(f"Error de Google: {res_j.get('error', {}).get('message')}")
+            return None
+    except Exception as e:
+        st.error(f"Error en el análisis: {e}")
+        return None
+
+# --- 3. EXTRACCIÓN WEB ---
+
+def extraer_datos_web(url):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        imgs = [img.get('src') for img in soup.find_all('img') if 'tcimg' in str(img.get('src'))]
+        desc = soup.find('div', {'id': 'descriptionContents'})
+        texto = desc.get_text(separator=' ', strip=True) if desc else soup.get_text()[:4000]
+        return texto, imgs
+    except: return None, []
+
+# --- 4. INTERFAZ ---
+
+st.title("📚 Catalogador v3.5 (Gemini 2.5)")
+
+with st.container(border=True):
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1: url_lote = st.text_input("🔗 URL Todocolección")
+    with col2: id_lote = st.text_input("🆔 ID")
+    with col3: ubi_lote = st.text_input("📍 Ubicación")
+
+if st.button("🚀 Analizar Lote", type="primary", use_container_width=True):
+    if url_lote and id_lote:
+        with st.spinner("Analizando con Gemini 2.5 Flash..."):
+            txt, imgs = extraer_datos_web(url_lote)
+            if txt:
+                res = analizar_con_ia(txt, imgs)
+                if res:
+                    st.session_state.datos_extraidos = res
+                    st.success("Información extraída.")
+    else:
+        st.warning("Introduce URL e ID.")
+
+# --- 5. FORMULARIO Y GUARDADO ---
+
+if st.session_state.datos_extraidos:
+    d = st.session_state.datos_extraidos
+    st.divider()
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        f_aut = st.text_input("Autor", d.get('Autor', '---'))
+        f_tit = st.text_input("Título", d.get('Titulo', '---'))
+        f_tra = st.text_input("Traductor", d.get('Traductor', '---'))
+        f_ilu = st.text_input("Ilustrador", d.get('Ilustrador', '---'))
+        f_edi = st.text_input("Editorial", d.get('Editorial', '---'))
+        f_col = st.text_input("Colección", d.get('Coleccion', '---'))
+        f_pob = st.text_input("Población", d.get('Poblacion', '---'))
+    with c2:
+        f_ano = st.text_input("Año", d.get('Año', '---'))
+        f_pri = st.text_input("1ª Edición", d.get('Primera_Edicion', '---'))
+        f_tem = st.text_input("Temática", d.get('Tematica', '---'))
+        f_cat = st.text_input("Categoría", d.get('Categorias', '---'))
+        f_enc = st.text_input("Encuadernación", d.get('Encuadernacion', '---'))
+        f_isb = st.text_input("ISBN", d.get('ISBN', '---'))
+        f_idi = st.text_input("Idioma", d.get('Idioma', '---'))
+    with c3:
+        f_pag = st.text_input("Páginas", d.get('Paginas', '---'))
+        f_med = st.text_input("Medidas", d.get('Medidas', '---'))
+        f_pes = st.text_input("Peso", d.get('Peso', '---'))
+        f_pre = st.text_input("Precio", d.get('Precio', '---'))
+        f_obs = st.text_area("Observaciones", d.get('Observaciones', '---'))
+
+    if st.button("💾 GUARDAR EN GOOGLE SHEETS", type="primary", use_container_width=True):
+        try:
+            with st.spinner("Conectando con Google Sheets..."):
+                scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+                creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+                client = gspread.authorize(creds)
+                sheet = client.open(EXCEL_NAME).worksheet(SHEET_NAME)
+                
+                fila = [id_lote, ubi_lote, f_aut, f_tit, f_tra, f_ilu, f_edi, f_col, f_pob, f_ano, f_pri, f_tem, f_cat, f_enc, f_isb, f_idi, f_obs, f_pag, f_med, f_pes, f_pre]
+                sheet.append_row(fila)
+                
+                st.balloons()
+                st.toast("¡Libro guardado!", icon="✅")
+                st.session_state.datos_extraidos = None
+                st.rerun()
+        except Exception as e:
+            st.error(f"Error al guardar: {e}")
+
+if st.button("🧹 Limpiar formulario"):
+    st.session_state.datos_extraidos = None
+    st.rerun()
