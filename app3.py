@@ -40,106 +40,106 @@ except Exception as e:
     st.error(f"❌ Error en Secretos: {e}")
     st.stop()
 
-st.set_page_config(page_title="Catalogador Auto-Modelo", layout="wide")
+st.set_page_config(page_title="Catalogador Gemini 2.5", layout="wide", page_icon="📚")
 
 if 'datos_extraidos' not in st.session_state:
     st.session_state.datos_extraidos = None
 
-# --- 2. LÓGICA DE DETECCIÓN DE MODELOS ---
-
-def listar_modelos_disponibles():
-    """Consulta a la API qué modelos tiene permitidos esta cuenta."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
-    try:
-        res = requests.get(url).json()
-        return [m['name'] for m in res.get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
-    except:
-        return []
+# --- 2. LÓGICA DE IA (CONFIGURADA PARA GEMINI 2.5 FLASH) ---
 
 def analizar_con_ia(texto, fotos):
-    # Intentamos detectar modelos 2.0 o 1.5 disponibles
-    modelos_en_cuenta = listar_modelos_disponibles()
+    # Usamos el modelo exacto que aparece en tu posición 0: gemini-2.5-flash
+    modelo = "models/gemini-2.5-flash"
+    url_ia = f"https://generativelanguage.googleapis.com/v1beta/{modelo}:generateContent?key={API_KEY}"
     
-    if not modelos_en_cuenta:
-        st.error("No se detectaron modelos disponibles. Revisa tu API KEY.")
-        return None
-
-    # Prioridad: 2.0 Flash -> 1.5 Flash -> Primero de la lista
-    modelo_elegido = None
-    for m in modelos_en_cuenta:
-        if "gemini-2.0-flash" in m:
-            modelo_elegido = m
-            break
-    if not modelo_elegido:
-        for m in modelos_en_cuenta:
-            if "1.5-flash" in m:
-                modelo_elegido = m
-                break
-    if not modelo_elegido:
-        modelo_elegido = modelos_en_cuenta[0]
-
-    st.info(f"Usando modelo detectado: {modelo_elegido}")
+    prompt = """
+    Analiza este libro y genera un JSON con estos campos: 
+    Autor, Titulo, Traductor, Ilustrador, Editorial, Coleccion, Poblacion, Año, 
+    Primera_Edicion, Tematica, Categorias, Encuadernacion, ISBN, Idioma, 
+    Observaciones, Paginas, Medidas, Peso, Precio.
+    REGLA: Responde SOLO el JSON puro. Si no sabes un dato usa '---'.
+    """
     
-    url_ia = f"https://generativelanguage.googleapis.com/v1beta/{modelo_elegido}:generateContent?key={API_KEY}"
+    # Reducimos texto a 3000 caracteres para eficiencia
+    partes = [{"text": f"{prompt}\n\nTexto del lote: {texto[:3000]}"}]
     
-    prompt = """Responde SOLAMENTE con un objeto JSON. Extrae: Autor, Titulo, Traductor, Ilustrador, Editorial, Coleccion, Poblacion, Año, Primera_Edicion, Tematica, Categorias, Encuadernacion, ISBN, Idioma, Observaciones, Paginas, Medidas, Peso, Precio. Usa '---' si falta el dato."""
-    
-    partes = [{"text": f"{prompt}\n\nTexto: {texto[:2000]}"}]
-    if fotos:
+    # Enviamos las 2 primeras fotos (Gemini 2.5 las procesa de maravilla)
+    for f in fotos[:2]:
         try:
-            img_data = base64.b64encode(requests.get(fotos[0], timeout=5).content).decode('utf-8')
+            img_data = base64.b64encode(requests.get(f, timeout=5).content).decode('utf-8')
             partes.append({"inline_data": {"mime_type": "image/jpeg", "data": img_data}})
-        except: pass
+        except: continue
 
     payload = {
         "contents": [{"parts": partes}],
-        "generationConfig": {"temperature": 0.1, "response_mime_type": "application/json"}
+        "generationConfig": {
+            "temperature": 0.1,
+            "response_mime_type": "application/json"
+        }
     }
 
     try:
-        res = requests.post(url_ia, json=payload, timeout=25)
+        res = requests.post(url_ia, json=payload, timeout=30)
         res_j = res.json()
+        
         if 'candidates' in res_j:
-            return json.loads(res_j['candidates'][0]['content']['parts'][0]['text'])
+            texto_respuesta = res_j['candidates'][0]['content']['parts'][0]['text']
+            return json.loads(texto_respuesta)
         else:
-            st.error(f"Error: {res_j.get('error', {}).get('message')}")
-            st.write("Modelos disponibles en tu cuenta:", modelos_en_cuenta)
+            st.error(f"Error de la API ({modelo}): {res_j.get('error', {}).get('message', 'Desconocido')}")
             return None
     except Exception as e:
-        st.error(f"Error crítico: {e}")
+        st.error(f"Error al procesar con IA: {e}")
         return None
 
-# --- 3. SCRAPING Y RESTO ---
+# --- 3. SCRAPING WEB ---
 
 def extraer_datos_web(url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         r = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
+        
+        # Imágenes
         imgs = [img.get('src') for img in soup.find_all('img') if 'tcimg' in str(img.get('src'))]
+        
+        # Texto descriptivo
         desc = soup.find('div', {'id': 'descriptionContents'})
-        texto = desc.get_text(separator=' ', strip=True) if desc else soup.get_text()[:3000]
+        texto = desc.get_text(separator=' ', strip=True) if desc else soup.get_text()[:4000]
+        
         return texto, imgs
-    except: return None, []
+    except Exception as e:
+        st.error(f"Error leyendo la web: {e}")
+        return None, []
 
-st.title("📚 Catalogador con Auto-Selección de Modelo")
+# --- 4. INTERFAZ ---
 
-col1, col2, col3 = st.columns([3, 1, 1])
-with col1: url_lote = st.text_input("🔗 URL")
-with col2: id_lote = st.text_input("🆔 ID")
-with col3: ubi_lote = st.text_input("📍 Ubicación")
+st.title("📚 Catalogador Inteligente (Gemini 2.5 Flash)")
 
-if st.button("🚀 Analizar"):
-    txt, imgs = extraer_datos_web(url_lote)
-    if txt:
-        res = analizar_con_ia(txt, imgs)
-        if res: st.session_state.datos_extraidos = res
+with st.container(border=True):
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1: url_lote = st.text_input("🔗 URL de Todocolección")
+    with col2: id_lote = st.text_input("🆔 ID Libro")
+    with col3: ubi_lote = st.text_input("📍 Ubicación")
+
+if st.button("🚀 Analizar Libro", type="primary", use_container_width=True):
+    if url_lote and id_lote:
+        with st.spinner("Gemini 2.5 analizando texto e imágenes..."):
+            txt, imgs = extraer_datos_web(url_lote)
+            if txt:
+                res = analizar_con_ia(txt, imgs)
+                if res:
+                    st.session_state.datos_extraidos = res
+                    st.success("¡Análisis completado!")
+    else:
+        st.warning("Faltan campos obligatorios.")
+
+# --- 5. FORMULARIO Y GUARDADO ---
 
 if st.session_state.datos_extraidos:
     d = st.session_state.datos_extraidos
     st.divider()
     c1, c2, c3 = st.columns(3)
-    # [Campos de entrada iguales al código anterior para ahorrar espacio]
     with c1:
         f_aut = st.text_input("Autor", d.get('Autor', '---'))
         f_tit = st.text_input("Título", d.get('Titulo', '---'))
@@ -161,17 +161,24 @@ if st.session_state.datos_extraidos:
         f_med = st.text_input("Medidas", d.get('Medidas', '---'))
         f_pes = st.text_input("Peso", d.get('Peso', '---'))
         f_pre = st.text_input("Precio", d.get('Precio', '---'))
-        f_obs = st.text_area("Observaciones", d.get('Observaciones', '---'))
+        f_obs = st.text_area("Observaciones", d.get('Observaciones', '---'), height=155)
 
-    if st.button("💾 GUARDAR"):
+    if st.button("💾 CONFIRMAR Y GUARDAR EN SHEETS", type="primary", use_container_width=True):
         try:
             scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
             creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
             client = gspread.authorize(creds)
             sheet = client.open(EXCEL_NAME).worksheet(SHEET_NAME)
+            
             fila = [id_lote, ubi_lote, f_aut, f_tit, f_tra, f_ilu, f_edi, f_col, f_pob, f_ano, f_pri, f_tem, f_cat, f_enc, f_isb, f_idi, f_obs, f_pag, f_med, f_pes, f_pre]
+            
             sheet.append_row(fila)
-            st.success("Guardado")
+            st.balloons()
             st.session_state.datos_extraidos = None
             st.rerun()
-        except Exception as e: st.error(f"Error: {e}")
+        except Exception as e:
+            st.error(f"Error al guardar: {e}")
+
+if st.button("🧹 Limpiar / Nuevo"):
+    st.session_state.datos_extraidos = None
+    st.rerun()
