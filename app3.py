@@ -141,4 +141,44 @@ if st.session_state.datos_extraidos:
     c_a, c_b, c_c = st.columns(3)
     with c_a:
         f_aut = st.text_input("Autor", d.get('Autor', '---'))
-        f_tit = st.text_input("Título",
+        f_tit = st.text_input("Título", d.get('Titulo', '---'))
+        f_tra = st.text_input("Traductor", d.get('Traductor', '---'))
+        f_ilu = st.text_input("Ilustrador", d.get('Ilustrador', '---'))
+        f_edi = st.text_input("Editorial", d.get('Editorial', '---'))
+        f_col = st.text_input("Colección", d.get('Coleccion', '---'))
+        f_pob = st.text_input("Población", d.get('Poblacion', '---'))
+    with c_b:
+        f_ano = st.text_input("Año", d.get('Año', '---'))
+        f_pri = st.text_input("1ª Edición", d.get('Primera_Edicion', '---'))
+        f_tem = st.text_input("Temática", d.get('Tematica', '---'))
+        f_cat = st.text_input("Categoría (CDU)", d.get('Categorias', '---'))
+        f_enc = st.text_input("Encuadernación", d.get('Encuadernacion', '---'))
+        f_isb = st.text_input("ISBN", d.get('ISBN', '---'))
+        f_idi = st.text_input("Idioma", d.get('Idioma', '---'))
+    with c_c:
+        f_pag = st.text_input("Páginas", d.get('Paginas', '---'))
+        f_med = st.text_input("Medidas", d.get('Medidas', '---'))
+        f_pes = st.text_input("Peso", d.get('Peso', '---'))
+        f_pre = st.text_input("Precio", d.get('Precio', '---'))
+        f_obs = st.text_area("Observaciones", d.get('Observaciones', '---'), height=155)
+
+    if st.button("💾 GUARDAR EN GOOGLE SHEETS", type="primary", use_container_width=True):
+        try:
+            scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+            client = gspread.authorize(creds)
+            sheet = client.open(EXCEL_NAME).worksheet(SHEET_NAME)
+            
+            fila = [id_interno, ubicacion, f_aut, f_tit, f_tra, f_ilu, f_edi, f_col, f_pob, f_ano, f_pri, f_tem, f_cat, f_enc, f_isb, f_idi, f_obs, f_pag, f_med, f_pes, f_pre]
+            
+            sheet.append_row(fila)
+            st.balloons()
+            st.success("✅ ¡Guardado!")
+            st.session_state.datos_extraidos = None
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error al guardar: {e}")
+
+if st.button("🧹 Limpiar"):
+    st.session_state.datos_extraidos = None
+    st.rerun()
