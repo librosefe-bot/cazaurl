@@ -41,62 +41,57 @@ except Exception as e:
     st.error(f"❌ Error en Secretos: {e}")
     st.stop()
 
-st.set_page_config(page_title="Catalogador Pro IA", layout="wide", page_icon="📚")
+st.set_page_config(page_title="Catalogador Pro v3.2", layout="wide", page_icon="📚")
 
 if 'datos_extraidos' not in st.session_state:
     st.session_state.datos_extraidos = None
 
-# --- 2. LÓGICA DE IA CON AUTO-REINTENTO DE RUTA ---
+# --- 2. LÓGICA DE IA (COMPATIBLE CON V1 ESTABLE) ---
 
 def analizar_con_ia(texto, fotos):
-    # Lista de rutas posibles (Google cambia estas rutas según la región/cuenta)
-    rutas_api = [
-        f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={API_KEY}",
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}",
-        f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key={API_KEY}"
-    ]
+    # Usamos la ruta v1 estándar para evitar errores de campos desconocidos
+    url_ia = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={API_KEY}"
     
-    texto_reducido = texto[:2500]
+    texto_reducido = texto[:2000]
+    # Prompt reforzado para asegurar JSON sin comandos especiales
     prompt = """
-    Analiza el libro y responde SOLO con un JSON plano.
-    Campos: Autor, Titulo, Traductor, Ilustrador, Editorial, Coleccion, Poblacion, Año, 
-    Primera_Edicion, Tematica, Categorias, Encuadernacion, ISBN, Idioma, 
-    Observaciones, Paginas, Medidas, Peso, Precio.
-    Usa '---' si no hay datos.
+    Analiza este libro y genera un JSON con estos campos: Autor, Titulo, Traductor, Ilustrador, Editorial, Coleccion, Poblacion, Año, Primera_Edicion, Tematica, Categorias, Encuadernacion, ISBN, Idioma, Observaciones, Paginas, Medidas, Peso, Precio.
+    REGLA OBLIGATORIA: Responde ÚNICAMENTE con el objeto JSON, sin palabras introductorias, sin bloques de código ni formato markdown. Si no hay un dato usa '---'.
     """
     
     partes = [{"text": f"{prompt}\n\nTexto: {texto_reducido}"}]
     for f in fotos[:2]:
         try:
-            img_data = base64.b64encode(requests.get(f, timeout=5).content).decode('utf-8')
-            partes.append({"inline_data": {"mime_type": "image/jpeg", "data": img_data}})
+            img_raw = requests.get(f, timeout=5).content
+            partes.append({"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(img_raw).decode('utf-8')}})
         except: continue
 
     payload = {
         "contents": [{"parts": partes}],
-        "generationConfig": {"response_mime_type": "application/json", "temperature": 0.1}
+        "generationConfig": {
+            "temperature": 0.1,
+            "topP": 0.95,
+            "maxOutputTokens": 1000
+        }
     }
 
-    ultima_respuesta = None
-    for url in rutas_api:
-        try:
-            res = requests.post(url, json=payload, timeout=30)
-            res_j = res.json()
-            if 'candidates' in res_j:
-                texto_ia = res_j['candidates'][0]['content']['parts'][0]['text']
-                return json.loads(texto_ia)
-            ultima_respuesta = res_j
-        except:
-            continue
-    
-    # Si llega aquí es que todas las rutas fallaron
-    if ultima_respuesta and 'error' in ultima_respuesta:
-        st.error(f"Error de Google: {ultima_respuesta['error'].get('message')}")
-    else:
-        st.error("No se pudo conectar con ningún modelo de Gemini. Revisa tu API Key.")
-    return None
+    try:
+        res = requests.post(url_ia, json=payload, timeout=30)
+        res_j = res.json()
+        
+        if 'candidates' in res_j:
+            texto_ia = res_j['candidates'][0]['content']['parts'][0]['text']
+            # Limpiamos posibles decoraciones Markdown que la IA ponga por error
+            texto_ia = texto_ia.replace("```json", "").replace("```", "").strip()
+            return json.loads(texto_ia)
+        else:
+            st.error(f"Error de Google: {res_j.get('error', {}).get('message', 'Sin respuesta')}")
+            return None
+    except Exception as e:
+        st.error(f"Error procesando JSON: {e}")
+        return None
 
-# --- 3. EXTRACCIÓN WEB ---
+# --- 3. SCRAPING WEB ---
 
 def extraer_datos_web(url):
     try:
@@ -109,9 +104,9 @@ def extraer_datos_web(url):
         return texto, imgs
     except: return None, []
 
-# --- 4. INTERFAZ ---
+# --- 4. INTERFAZ STREAMLIT ---
 
-st.title("📚 Catalogador Inteligente v3.1")
+st.title("📚 Catalogador Inteligente v3.2")
 
 with st.container(border=True):
     col1, col2, col3 = st.columns([3, 1, 1])
@@ -121,13 +116,13 @@ with st.container(border=True):
 
 if st.button("🚀 Analizar Libro", type="primary", use_container_width=True):
     if url_lote and id_lote:
-        with st.spinner("La IA está trabajando..."):
+        with st.spinner("La IA está extrayendo los datos..."):
             txt, imgs = extraer_datos_web(url_lote)
             if txt:
                 res = analizar_con_ia(txt, imgs)
                 if res: 
                     st.session_state.datos_extraidos = res
-                    st.success("Análisis listo.")
+                    st.success("Análisis completado.")
     else: st.warning("ID y URL son obligatorios.")
 
 # --- 5. REVISIÓN Y GUARDADO ---
@@ -159,7 +154,7 @@ if st.session_state.datos_extraidos:
         f_pre = st.text_input("Precio", d.get('Precio', '---'))
         f_obs = st.text_area("Observaciones", d.get('Observaciones', '---'))
 
-    if st.button("💾 GUARDAR EN SHEETS", type="primary", use_container_width=True):
+    if st.button("💾 GUARDAR EN GOOGLE SHEETS", type="primary", use_container_width=True):
         try:
             scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
             creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
@@ -169,6 +164,7 @@ if st.session_state.datos_extraidos:
             fila = [id_lote, ubi_lote, f_aut, f_tit, f_tra, f_ilu, f_edi, f_col, f_pob, f_ano, f_pri, f_tem, f_cat, f_enc, f_isb, f_idi, f_obs, f_pag, f_med, f_pes, f_pre]
             sheet.append_row(fila)
             st.balloons()
+            st.toast("¡Guardado!", icon="✅")
             st.session_state.datos_extraidos = None
             st.rerun()
         except Exception as e: st.error(f"Error al guardar: {e}")
