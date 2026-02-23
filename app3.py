@@ -40,30 +40,51 @@ except Exception as e:
     st.error(f"❌ Error en Secretos: {e}")
     st.stop()
 
-st.set_page_config(page_title="Catalogador Gemini 2.0", layout="wide")
+st.set_page_config(page_title="Catalogador Auto-Modelo", layout="wide")
 
 if 'datos_extraidos' not in st.session_state:
     st.session_state.datos_extraidos = None
 
-# --- 2. LÓGICA DE IA (ADAPTADA A MODELOS 2.0 / FLASH) ---
+# --- 2. LÓGICA DE DETECCIÓN DE MODELOS ---
+
+def listar_modelos_disponibles():
+    """Consulta a la API qué modelos tiene permitidos esta cuenta."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+    try:
+        res = requests.get(url).json()
+        return [m['name'] for m in res.get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
+    except:
+        return []
 
 def analizar_con_ia(texto, fotos):
-    # Priorizamos los modelos de la serie 2.0 que es lo que pide tu cuenta
-    intentos = [
-        "v1beta/models/gemini-2.0-flash",
-        "v1beta/models/gemini-2.0-flash-lite-preview-02-05", # Versión 2.5/Lite
-        "v1beta/models/gemini-1.5-flash"
-    ]
+    # Intentamos detectar modelos 2.0 o 1.5 disponibles
+    modelos_en_cuenta = listar_modelos_disponibles()
     
-    prompt = """Responde UNICAMENTE con un objeto JSON. Extrae del libro: 
-    Autor, Titulo, Traductor, Ilustrador, Editorial, Coleccion, Poblacion, Año, 
-    Primera_Edicion, Tematica, Categorias, Encuadernacion, ISBN, Idioma, 
-    Observaciones, Paginas, Medidas, Peso, Precio. 
-    Si no lo sabes usa '---'."""
+    if not modelos_en_cuenta:
+        st.error("No se detectaron modelos disponibles. Revisa tu API KEY.")
+        return None
+
+    # Prioridad: 2.0 Flash -> 1.5 Flash -> Primero de la lista
+    modelo_elegido = None
+    for m in modelos_en_cuenta:
+        if "gemini-2.0-flash" in m:
+            modelo_elegido = m
+            break
+    if not modelo_elegido:
+        for m in modelos_en_cuenta:
+            if "1.5-flash" in m:
+                modelo_elegido = m
+                break
+    if not modelo_elegido:
+        modelo_elegido = modelos_en_cuenta[0]
+
+    st.info(f"Usando modelo detectado: {modelo_elegido}")
+    
+    url_ia = f"https://generativelanguage.googleapis.com/v1beta/{modelo_elegido}:generateContent?key={API_KEY}"
+    
+    prompt = """Responde SOLAMENTE con un objeto JSON. Extrae: Autor, Titulo, Traductor, Ilustrador, Editorial, Coleccion, Poblacion, Año, Primera_Edicion, Tematica, Categorias, Encuadernacion, ISBN, Idioma, Observaciones, Paginas, Medidas, Peso, Precio. Usa '---' si falta el dato."""
     
     partes = [{"text": f"{prompt}\n\nTexto: {texto[:2000]}"}]
-    
-    # En Gemini 2.0 las imágenes se procesan mejor, pero limitamos a 1 para asegurar cuota free
     if fotos:
         try:
             img_data = base64.b64encode(requests.get(fotos[0], timeout=5).content).decode('utf-8')
@@ -72,27 +93,21 @@ def analizar_con_ia(texto, fotos):
 
     payload = {
         "contents": [{"parts": partes}],
-        "generationConfig": {
-            "temperature": 0.1,
-            "response_mime_type": "application/json" # Las series 2.0 sí soportan esto nativamente
-        }
+        "generationConfig": {"temperature": 0.1, "response_mime_type": "application/json"}
     }
 
-    ultima_respuesta = ""
-    for ruta in intentos:
-        url = f"https://generativelanguage.googleapis.com/{ruta}:generateContent?key={API_KEY}"
-        try:
-            res = requests.post(url, json=payload, timeout=25)
-            res_j = res.json()
-            if 'candidates' in res_j:
-                raw_text = res_j['candidates'][0]['content']['parts'][0]['text']
-                return json.loads(raw_text)
-            ultima_respuesta = res_j.get('error', {}).get('message', 'Modelo no disponible')
-        except:
-            continue
-            
-    st.error(f"Error de acceso: {ultima_respuesta}. Verifica que el modelo 2.0 Flash esté activo en tu Google AI Studio.")
-    return None
+    try:
+        res = requests.post(url_ia, json=payload, timeout=25)
+        res_j = res.json()
+        if 'candidates' in res_j:
+            return json.loads(res_j['candidates'][0]['content']['parts'][0]['text'])
+        else:
+            st.error(f"Error: {res_j.get('error', {}).get('message')}")
+            st.write("Modelos disponibles en tu cuenta:", modelos_en_cuenta)
+            return None
+    except Exception as e:
+        st.error(f"Error crítico: {e}")
+        return None
 
 # --- 3. SCRAPING Y RESTO ---
 
@@ -107,8 +122,7 @@ def extraer_datos_web(url):
         return texto, imgs
     except: return None, []
 
-# --- INTERFAZ ---
-st.title("📚 Catalogador IA (Generación 2.0)")
+st.title("📚 Catalogador con Auto-Selección de Modelo")
 
 col1, col2, col3 = st.columns([3, 1, 1])
 with col1: url_lote = st.text_input("🔗 URL")
@@ -125,6 +139,7 @@ if st.session_state.datos_extraidos:
     d = st.session_state.datos_extraidos
     st.divider()
     c1, c2, c3 = st.columns(3)
+    # [Campos de entrada iguales al código anterior para ahorrar espacio]
     with c1:
         f_aut = st.text_input("Autor", d.get('Autor', '---'))
         f_tit = st.text_input("Título", d.get('Titulo', '---'))
@@ -156,7 +171,7 @@ if st.session_state.datos_extraidos:
             sheet = client.open(EXCEL_NAME).worksheet(SHEET_NAME)
             fila = [id_lote, ubi_lote, f_aut, f_tit, f_tra, f_ilu, f_edi, f_col, f_pob, f_ano, f_pri, f_tem, f_cat, f_enc, f_isb, f_idi, f_obs, f_pag, f_med, f_pes, f_pre]
             sheet.append_row(fila)
-            st.success("Guardado en Google Sheets")
+            st.success("Guardado")
             st.session_state.datos_extraidos = None
             st.rerun()
-        except Exception as e: st.error(f"Error Sheets: {e}")
+        except Exception as e: st.error(f"Error: {e}")
