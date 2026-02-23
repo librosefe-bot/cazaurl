@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import base64
 
-# --- FUNCIÓN PARA LIMPIAR LA CLAVE DE GOOGLE SHEETS ---
+# --- LIMPIEZA DE CLAVE GOOGLE SHEETS ---
 def limpiar_llave_pem(llave):
     if not llave: return ""
     llave = llave.strip().strip('"').strip("'").replace("\\n", "\n")
@@ -40,49 +40,58 @@ except Exception as e:
     st.error(f"❌ Error en Secretos: {e}")
     st.stop()
 
-st.set_page_config(page_title="Catalogador Pro v3.4", layout="wide")
+st.set_page_config(page_title="Catalogador Gemini 2.0", layout="wide")
 
 if 'datos_extraidos' not in st.session_state:
     st.session_state.datos_extraidos = None
 
-# --- 2. LÓGICA DE IA (BÚSQUEDA AGRESIVA DE MODELO) ---
+# --- 2. LÓGICA DE IA (ADAPTADA A MODELOS 2.0 / FLASH) ---
 
 def analizar_con_ia(texto, fotos):
-    # Probamos todas las combinaciones posibles de nombres de modelos y versiones
+    # Priorizamos los modelos de la serie 2.0 que es lo que pide tu cuenta
     intentos = [
-        "v1beta/models/gemini-1.5-flash",
-        "v1/models/gemini-1.5-flash",
-        "v1beta/models/gemini-1.5-flash-latest",
-        "v1beta/models/gemini-pro"
+        "v1beta/models/gemini-2.0-flash",
+        "v1beta/models/gemini-2.0-flash-lite-preview-02-05", # Versión 2.5/Lite
+        "v1beta/models/gemini-1.5-flash"
     ]
     
-    prompt = """Responde SOLAMENTE con un objeto JSON (sin markdown). Extrae: Autor, Titulo, Traductor, Ilustrador, Editorial, Coleccion, Poblacion, Año, Primera_Edicion, Tematica, Categorias, Encuadernacion, ISBN, Idioma, Observaciones, Paginas, Medidas, Peso, Precio."""
+    prompt = """Responde UNICAMENTE con un objeto JSON. Extrae del libro: 
+    Autor, Titulo, Traductor, Ilustrador, Editorial, Coleccion, Poblacion, Año, 
+    Primera_Edicion, Tematica, Categorias, Encuadernacion, ISBN, Idioma, 
+    Observaciones, Paginas, Medidas, Peso, Precio. 
+    Si no lo sabes usa '---'."""
     
-    partes = [{"text": f"{prompt}\n\nContenido: {texto[:2000]}"}]
-    for f in fotos[:2]:
+    partes = [{"text": f"{prompt}\n\nTexto: {texto[:2000]}"}]
+    
+    # En Gemini 2.0 las imágenes se procesan mejor, pero limitamos a 1 para asegurar cuota free
+    if fotos:
         try:
-            img_data = base64.b64encode(requests.get(f, timeout=5).content).decode('utf-8')
+            img_data = base64.b64encode(requests.get(fotos[0], timeout=5).content).decode('utf-8')
             partes.append({"inline_data": {"mime_type": "image/jpeg", "data": img_data}})
-        except: continue
+        except: pass
 
-    payload = {"contents": [{"parts": partes}], "generationConfig": {"temperature": 0.1}}
+    payload = {
+        "contents": [{"parts": partes}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "response_mime_type": "application/json" # Las series 2.0 sí soportan esto nativamente
+        }
+    }
 
     ultima_respuesta = ""
     for ruta in intentos:
         url = f"https://generativelanguage.googleapis.com/{ruta}:generateContent?key={API_KEY}"
         try:
-            res = requests.post(url, json=payload, timeout=20)
+            res = requests.post(url, json=payload, timeout=25)
             res_j = res.json()
             if 'candidates' in res_j:
                 raw_text = res_j['candidates'][0]['content']['parts'][0]['text']
-                # Limpiamos posibles bloques de código ```json
-                clean_json = re.sub(r'```json\s?|```', '', raw_text).strip()
-                return json.loads(clean_json)
-            ultima_respuesta = res_j.get('error', {}).get('message', 'Error desconocido')
+                return json.loads(raw_text)
+            ultima_respuesta = res_j.get('error', {}).get('message', 'Modelo no disponible')
         except:
             continue
             
-    st.error(f"Google no reconoce los modelos. Error reportado: {ultima_respuesta}")
+    st.error(f"Error de acceso: {ultima_respuesta}. Verifica que el modelo 2.0 Flash esté activo en tu Google AI Studio.")
     return None
 
 # --- 3. SCRAPING Y RESTO ---
@@ -98,7 +107,8 @@ def extraer_datos_web(url):
         return texto, imgs
     except: return None, []
 
-st.title("📚 Catalogador v3.4")
+# --- INTERFAZ ---
+st.title("📚 Catalogador IA (Generación 2.0)")
 
 col1, col2, col3 = st.columns([3, 1, 1])
 with col1: url_lote = st.text_input("🔗 URL")
@@ -140,13 +150,13 @@ if st.session_state.datos_extraidos:
 
     if st.button("💾 GUARDAR"):
         try:
-            scope = ["[https://www.googleapis.com/auth/spreadsheets](https://www.googleapis.com/auth/spreadsheets)", "[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)"]
+            scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
             creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
             client = gspread.authorize(creds)
             sheet = client.open(EXCEL_NAME).worksheet(SHEET_NAME)
             fila = [id_lote, ubi_lote, f_aut, f_tit, f_tra, f_ilu, f_edi, f_col, f_pob, f_ano, f_pri, f_tem, f_cat, f_enc, f_isb, f_idi, f_obs, f_pag, f_med, f_pes, f_pre]
             sheet.append_row(fila)
-            st.success("Guardado")
+            st.success("Guardado en Google Sheets")
             st.session_state.datos_extraidos = None
             st.rerun()
-        except Exception as e: st.error(f"Error: {e}")
+        except Exception as e: st.error(f"Error Sheets: {e}")
